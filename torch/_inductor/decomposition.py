@@ -981,13 +981,30 @@ def uniform(
         cast(list[int], shape), cast(list[int], stride), 0
     )
     sample_shape: list[int | torch.SymInt] = [storage_len]
+    # Sample in float32 so replace_random.py's rand-mode fix doesn't also
+    # remap samples here.
+    compute_dtype = torch.float32 if dtype in (torch.float16, torch.bfloat16) else dtype
     if generator is None:
-        rand_samples = torch.rand(sample_shape, dtype=dtype, device=device)
+        rand_samples = torch.rand(sample_shape, dtype=compute_dtype, device=device)
     else:
         rand_samples = torch.rand(
-            sample_shape, generator=generator, dtype=dtype, device=device
+            sample_shape, generator=generator, dtype=compute_dtype, device=device
         )
     res = (high - low) * rand_samples + low
+    if high != low:
+        # Compare in result space before the cast: Inductor rounds only at
+        # the store, and a sample-space threshold amplifies error via
+        # (high - low). fp32/fp64 compare against high directly since res
+        # is already dtype precision and the midpoint isn't representable.
+        high_t = torch.tensor(float(high), dtype=dtype)
+        if dtype in (torch.float16, torch.bfloat16):
+            below_high = torch.nextafter(high_t, torch.tensor(float(low), dtype=dtype))
+            threshold = (high_t.item() + below_high.item()) / 2.0
+        else:
+            threshold = high_t.item()
+        res = torch.where(res >= threshold, torch.full_like(res, low), res)
+    if compute_dtype != dtype:
+        res = res.to(dtype)
     return res.as_strided(shape, stride)
 
 

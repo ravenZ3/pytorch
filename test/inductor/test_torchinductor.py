@@ -8359,6 +8359,77 @@ for dtype in (torch.int32, torch.int64):
         self.assertEqual(res.stride(), ref.stride())
         self.assertTrue(bool(((res >= 0.0) & (res <= 1.0)).all()))
 
+    @parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_rand_uniform_low_precision_excludes_upper_bound(self, dtype):
+        if not self.is_dtype_supported(dtype):
+            raise unittest.SkipTest(f"{dtype} not supported on {self.device}")
+
+        n = 2_000_000
+
+        def rand_fn(x):
+            return torch.rand(x.shape, dtype=x.dtype, device=x.device)
+
+        def rand_like_fn(x):
+            return torch.rand_like(x)
+
+        def make_uniform_fn(lo, hi):
+            def uniform_fn(x):
+                return x.clone().uniform_(lo, hi)
+
+            return uniform_fn
+
+        x = torch.empty(n, dtype=dtype, device=self.device)
+
+        cases = (
+            ("rand", rand_fn, 0.0, 1.0),
+            ("rand_like", rand_like_fn, 0.0, 1.0),
+            ("uniform_(2.0, 5.0)", make_uniform_fn(2.0, 5.0), 2.0, 5.0),
+            ("uniform_(2.0, 5.1)", make_uniform_fn(2.0, 5.1), 2.0, 5.1),
+            ("uniform_(-100.0, 100.0)", make_uniform_fn(-100.0, 100.0), -100.0, 100.0),
+        )
+        for name, fn, low, high in cases:
+            high_in_dtype = torch.tensor(high, dtype=dtype).item()
+            low_in_dtype = torch.tensor(low, dtype=dtype).item()
+            compiled = torch.compile(fn, fullgraph=True)
+            torch.manual_seed(1234)
+            result = compiled(x)
+            self.assertLess(
+                result.max().item(),
+                high_in_dtype,
+                f"{name} returned the excluded upper bound",
+            )
+            not_low_fraction = (result != low_in_dtype).float().mean().item()
+            self.assertGreater(
+                not_low_fraction,
+                0.5,
+                f"{name} zeroed out too many samples (fraction != low: {not_low_fraction})",
+            )
+
+        # A spurious remap of uniform()'s own rand samples (double remap)
+        # thins values near `high` without changing max(), so the checks
+        # above can't catch it. wide_n and the 0.125 tolerance give a
+        # correct count about 3.5 sigma of margin (rel_std ~3.6% over 20
+        # seeds), while the double-remap bug's ~25-28% undercount fails.
+        wide_n = 4_000_000
+        wide_low, wide_high = -100.0, 100.0
+        high_t = torch.tensor(wide_high, dtype=dtype)
+        below_high = torch.nextafter(high_t, torch.tensor(wide_low, dtype=dtype)).item()
+        spacing = high_t.item() - below_high
+        expected_count = wide_n * spacing / (wide_high - wide_low)
+
+        wide_x = torch.empty(wide_n, dtype=dtype, device=self.device)
+        wide_fn = make_uniform_fn(wide_low, wide_high)
+        compiled_wide = torch.compile(wide_fn, fullgraph=True)
+        torch.manual_seed(1234)
+        compiled_count = (compiled_wide(wide_x) == below_high).sum().item()
+        self.assertLess(
+            abs(compiled_count - expected_count) / expected_count,
+            0.125,
+            f"count(result == below_high) diverged from its analytic "
+            f"expectation for uniform_({wide_low}, {wide_high}): "
+            f"expected={expected_count} compiled={compiled_count}",
+        )
+
     def test_complex_from_real_imag(self):
         def fn(x, y):
             return aten.complex.default(x, y)

@@ -188,7 +188,7 @@ def replace_random(
     size,
     *,
     generator=None,
-    dtype=None,
+    dtype: torch.dtype | None = None,
     device=None,
     layout=None,
     pin_memory=None,
@@ -202,6 +202,16 @@ def replace_random(
         result = inductor_prims.random(
             size, inductor_prims.seed(device), mode, **default_kwargs(device)
         )
+        if (
+            mode == "rand"
+            and dtype is not None
+            and dtype in (torch.float16, torch.bfloat16)
+        ):
+            # Remap before the cast below: Inductor keeps this chain in
+            # float32 registers and only rounds at the final store, so a
+            # post-cast `== 1.0` check would compare the unrounded value.
+            threshold = 1.0 - torch.finfo(dtype).eps / 4
+            result = torch.where(result >= threshold, torch.zeros_like(result), result)
         if dtype is not None:
             result = result.to(dtype)
         return result
