@@ -10583,6 +10583,30 @@ def forward(self, arg0_1: "Sym(s77)", arg1_1: "Sym(s27)", arg2_1: "Sym(s53)", ar
         self.assertEqual(result2d.shape, torch.Size([4, 3]))
         self.assertTrue((result2d >= 0).all() and (result2d < 8).all())
 
+    def test_exponential_excludes_inf(self):
+        # issue #198987: rand_like samples [0, 1) and can be exactly 0.0, so the
+        # exponential decomposition's log(uniform) hit log(0) = -inf and returned
+        # +inf, outside the (0, inf) support. The fix maps into (0, 1]. A 0.0 draw
+        # is too rare to hit by sampling, so force it to make this deterministic.
+        from unittest import mock
+
+        x = torch.empty(16, dtype=torch.float32, device=self.device)
+        forced = torch.zeros(16, dtype=torch.float32, device=self.device)
+        with mock.patch("torch.rand_like", return_value=forced):
+            out = torch._refs.exponential(x)
+        self.assertTrue(torch.isfinite(out).all(), "exponential produced non-finite")
+        self.assertTrue((out > 0).all(), "exponential must stay in (0, inf)")
+
+        # Smoke-run through the compiled path (statistical, not fail-without-fix).
+        def fn(t):
+            return t.clone().exponential_()
+
+        compiled = torch.compile(fn, fullgraph=True)
+        torch.manual_seed(0)
+        y = compiled(torch.empty(2**20, dtype=torch.float32, device=self.device))
+        self.assertTrue(torch.isfinite(y).all())
+        self.assertTrue((y > 0).all())
+
     def test_bincount(self):
         # aten.bincount: data-dependent output size; routes to ATen eager kernel.
         # Output is deterministic, so exact comparison is valid.

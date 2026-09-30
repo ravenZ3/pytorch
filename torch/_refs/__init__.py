@@ -6673,7 +6673,11 @@ def exponential(self, rate=1, generator=None):
         lambda: f"exponential_ expects lambda > 0.0, but found lambda={rate}",
     )
 
-    uniform_val = torch.rand_like(self)
+    # rand_like samples from [0, 1), but the transformation below (copied from
+    # transformation::exponential) assumes curand_uniform's (0, 1] range, where
+    # log's argument is never 0. Map into (0, 1] with 1 - rand so log(0) = -inf,
+    # and thus a +inf sample outside the (0, inf) support, cannot occur.
+    uniform_val = 1.0 - torch.rand_like(self)
 
     # copying numerics of transformation::exponential see comment:
     # curand_uniform has (0,1] bounds. log(1) is 0 and exponential excludes 0.
